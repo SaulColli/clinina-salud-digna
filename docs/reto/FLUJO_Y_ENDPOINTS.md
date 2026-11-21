@@ -41,7 +41,7 @@ físico en la clínica, que es donde el reconocimiento facial (opcional) aporta.
 |---|---|---|---|---|---|
 | 1 | **Web** | Elige "Ultrasonido obstétrico", ve el precio, elige la clínica Centro y un horario. Da su celular para "guardar su avance". Cierra la pestaña antes de confirmar. | Crea sesión anónima, luego un **paciente provisional** con su teléfono. Aparta el horario 24 h. Manda OTP por SMS/WhatsApp **[supuesto: OTP por WhatsApp]**. | `horario_apartado` | `sesion.iniciada`, `estudio.cotizado`, `clinica.elegida`, `horario.apartado`, `identidad.telefono_declarado` |
 | 2 | **WhatsApp** | Horas después escribe "hola". | El número coincide con el paciente; WhatsApp ya prueba que controla ese número → identidad `verificada`. El bot responde: *"Hola Ana, tienes un ultrasonido apartado en Centro el sábado 10:00. ¿Lo confirmo?"*. Ana pregunta por la preparación y responde "sí, pero tengo una duda del pago". | `pendiente_confirmacion` (pasos completos salvo la duda) | `canal.entrada`, `identidad.verificada`, `contexto.recuperado`, `mensaje.recibido`, `preparacion.enviada`, `pendiente.registrado` |
-| 3 | **Llamada (Retell)** | Llama al número del call center. | Retell consulta el contexto por el número que llama **antes de contestar**. El agente de voz saluda por nombre, ve la duda pendiente ("pago"), la resuelve, confirma la cita y ofrece pasarla con un asesor humano si hace falta. El asesor (rol Asesor) ve todo en el tablero. | `confirmado` | `llamada.iniciada`, `contexto.recuperado`, `pendiente.resuelto`, `cita.confirmada`, `llamada.terminada`, `llamada.resumida` |
+| 3 | **Llamada (Retell)** | Llama al número del call center. | Retell consulta el contexto por el número que llama **antes de contestar**. El agente de voz saluda por nombre, ve la duda pendiente ("pago"), la resuelve, confirma la cita y si Ana pide hablar con una persona, le avisa que un asesor la contactará a ese mismo número y crea una devolución de llamada. El asesor (rol Asesor) ve todo en el tablero. | `confirmado` | `llamada.iniciada`, `contexto.recuperado`, `pendiente.resuelto`, `cita.confirmada`, `llamada.terminada`, `llamada.resumida` |
 | 4 | **App** | Abre la app e inicia sesión con su teléfono (OTP). | Ve su cita confirmada, la preparación y un **QR de check-in**. Opcional: acepta el consentimiento facial y registra su rostro. | `confirmado` | `sesion.iniciada`, `cita.consultada`, `consentimiento.facial_otorgado`, `rostro.registrado` |
 | 5 | **Clínica** | Llega a recepción. | Check-in con **QR** o con **rostro** (si dio consentimiento). Recepción ve la ficha sin preguntar nada. Ana pasa a sala. | `en_clinica` → `atendido` | `checkin.realizado`, `atencion.iniciada`, `atencion.terminada` |
 
@@ -187,6 +187,10 @@ leerlo rápido). Así la línea de tiempo y el estado nunca se contradicen.
 | | `llamada.transferida` | retell | — | `a` (asesor) |
 | | `llamada.terminada` | retell | — | `duracion_s`, `razon_fin` |
 | | `llamada.resumida` | retell | — | `resumen` (anonimizado), `sentimiento` |
+| Escalamiento | `escalamiento.creado` | bot, agente_voz, paciente | — | `escalamiento_id`, `modalidad` (en_vivo, devolucion_llamada), `motivo`, `prioridad` |
+| | `escalamiento.notificado` | sistema | — | `medios` (sms, correo) |
+| | `escalamiento.asignado` / `escalamiento.resuelto` / `escalamiento.vencido` | asesor, sistema | — | `asesor_id`, `resolucion` |
+| | `devolucion.intento` | asesor | — | `resultado` (contesto, no_contesto, buzon) |
 | Asesor | `asesor.tomo_caso` / `asesor.nota_agregada` | asesor | — | `asesor_id` |
 | | `contexto.recuperado` | todos | — | `canal`, `pasos_completos` (para medir continuidad) |
 | Clínica | `checkin.realizado` | clínica | `en_clinica` | `metodo` (qr, facial, manual), `clinica_id` |
@@ -310,7 +314,7 @@ Prefijo `/api/v1` del motor de contexto.
 | `POST /canales/whatsapp/webhook` | Mensaje entrante: valida firma, resuelve identidad por `from`, lee contexto, clasifica intención, responde y emite eventos. Idempotente por id de mensaje | Meta | Nuevo |
 | `POST /canales/whatsapp/enviar` | Mensaje saliente (recordatorio, preparación) con plantilla aprobada | sistema, asesor | Nuevo |
 | `POST /canales/retell/entrante` | Webhook de llamada entrante: con el número que llama devuelve **variables dinámicas** para el agente (nombre, estudio, clínica, horario, pendientes) **[supuesto: verificar el formato exacto en la doc de Retell]** | Retell | Nuevo |
-| `POST /canales/retell/funciones/{nombre}` | Funciones que el agente de voz llama a mitad de la llamada: `obtener_contexto`, `buscar_horarios`, `confirmar_cita`, `reprogramar_cita`, `registrar_pendiente`, `transferir_asesor`. Cada una traduce a `/tramites/{id}/acciones` | Retell | Nuevo |
+| `POST /canales/retell/funciones/{nombre}` | Funciones que el agente de voz llama a mitad de la llamada: `obtener_contexto`, `buscar_horarios`, `confirmar_cita`, `reprogramar_cita`, `registrar_pendiente`, `escalar_a_humano` (no transfiere en vivo: crea una devolución de llamada al mismo número). Cada una traduce a `/tramites/{id}/acciones` | Retell | Nuevo |
 | `POST /canales/retell/eventos` | Eventos de la llamada (`call_started`, `call_ended`, `call_analyzed`) → `llamada.*`; guarda resumen anonimizado | Retell | Nuevo |
 | `POST /canales/web/eventos` | Atajo de `/eventos` para el sitio (abandono de página, paso visto) | web | Nuevo |
 
@@ -322,6 +326,13 @@ La **Clínica** usa `checkin` y `facial/verificar` con rol `recepcion`.
 | Método y ruta | Qué hace | Quién | API facial v2 |
 |---|---|---|---|
 | `GET /asesor/bandeja` | Pacientes con pendientes abiertos o llamadas transferidas | asesor | Nuevo |
+| `POST /escalamientos` | Crea un escalamiento. En web y WhatsApp es `en_vivo`; en una llamada es `devolucion_llamada` con el mismo número. Encola los avisos por SMS y correo | canal, Retell (función `escalar_a_humano`) | Nuevo |
+| `GET /escalamientos?estado=&modalidad=` | Casos abiertos para el asesor | asesor | Nuevo |
+| `POST /escalamientos/{id}/tomar` | El asesor toma el caso (y la conversación pasa a `con_asesor`) | asesor | Nuevo |
+| `POST /escalamientos/{id}/intentos` | Registra un intento de devolución de llamada | asesor | Nuevo |
+| `POST /escalamientos/{id}/resolver` | Cierra el caso y devuelve la conversación al bot | asesor | Nuevo |
+| `POST /conversaciones/{id}/mensajes` | El asesor contesta por el mismo canal (WhatsApp o web) | asesor | Nuevo |
+| `GET/PUT /asesor/preferencias-notificacion` | Qué avisos recibe por SMS y correo | asesor | Nuevo |
 | `POST /tramites/{id}/notas` | Nota interna del asesor (emite `asesor.nota_agregada`) | asesor | Nuevo |
 | `GET /admin/journey` | Embudo por estado y por canal, en vivo | admin | Nuevo |
 | `GET /admin/metricas` | Tiempo por etapa, % de transiciones con contexto recuperado, abandonos recuperados | admin | Nuevo |
@@ -340,6 +351,8 @@ La v2 resuelve **solo el factor biométrico opcional**. Los cuatro pilares del r
 (identidad, contexto, trazabilidad, seguridad) son trabajo nuevo.
 
 ---
+
+El modelo de datos que respalda estos endpoints está en [`MODELO_DE_DATOS.md`](MODELO_DE_DATOS.md).
 
 ## 6. Seguridad y privacidad (lo mínimo para la demo)
 
